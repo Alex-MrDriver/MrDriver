@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: GPL-3.0-or-later Or MIT
-// File: contracts\Interface\IBEP20.sol
 
 
 
@@ -101,13 +100,16 @@ interface IBEP20 {
    * a call to {approve}. `value` is the new allowance.
    */
     event Approval(address indexed owner, address indexed spender, uint256 value);
+
+    event Mint(address indexed receipent, uint256 value);
+
 }
 
 // File: contracts\Lib\Context.sol
 
 
 
-pragma solidity ^0.6.0;
+pragma solidity ^0.6.12;
 
 /*
  * @dev Provides information about the current execution context, including the
@@ -505,66 +507,262 @@ library Address {
     }
 }
 
-// File: contracts\Lib\BEP20.sol
 
 
-pragma solidity ^0.6.0;
-/**
- * @dev Implementation of the {IBEP20} interface.
- *
- * This implementation is agnostic to the way tokens are created. This means
- * that a supply mechanism has to be added in a derived contract using {_mint}.
- * For a generic mechanism see {BEP20PresetMinterPauser}.
- *
- * TIP: For a detailed writeup see our guide
- * https://forum.zeppelin.solutions/t/how-to-implement-BEP20-supply-mechanisms/226[How
- * to implement supply mechanisms].
- *
- * We have followed general OpenZeppelin guidelines: functions revert instead
- * of returning `false` on failure. This behavior is nonetheless conventional
- * and does not conflict with the expectations of BEP20 applications.
- *
- * Additionally, an {Approval} event is emitted on calls to {transferFrom}.
- * This allows applications to reconstruct the allowance for all accounts just
- * by listening to said events. Other implementations of the EIP may not emit
- * these events, as it isn't required by the specification.
- *
- * Finally, the non-standard {decreaseAllowance} and {increaseAllowance}
- * functions have been added to mitigate the well-known issues around setting
- * allowances. See {IBEP20-approve}.
- */
-contract BEP20 is Context, IBEP20, Ownable {
+contract MDR is Context, IBEP20, Ownable{
     using SafeMath for uint256;
     using Address for address;
-
-    mapping(address => uint256) private _balances;
 
     mapping(address => mapping(address => uint256)) private _allowances;
 
     uint256 private _totalSupply;
 
-    string private _name;
-    string private _symbol;
-    uint8 private _decimals;
+    string private _name = "MrDriver";
+    string private _symbol = "MDR";
+    uint8 private _decimals = 18;
 
-    /**
-     * @dev Sets the values for {name} and {symbol}, initializes {decimals} with
-     * a default value of 18.
-     *
-     * To select a different value for {decimals}, use {_setupDecimals}.
-     *
-     * All three of these values are immutable: they can only be set once during
-     * construction.
-     */
-    constructor(string memory name, string memory symbol) public {
-        _name = name;
-        _symbol = symbol;
-        _decimals = 18;
+    uint256 public RFIrate = 100; //1 % RFI Rate
+    bool public isRFIEnabled = false;
+
+    bool public isTranferBurnedEnabled = false;
+    uint256 public transferBurnrate = 100; // 1% burnrate for every transaction
+
+    uint256 public maxSupply = 200 * 10 ** 6 * 10 ** 18;
+
+
+    uint256 public initialSupply = 20 * 10 ** 6 * 10 ** 18;
+
+    address public founder = 0x87DC535e024D0b20485FE76b648A1D9E54C4a9A4;
+
+    address public burnAddr = 0x000000000000000000000000000000000000dEaD;
+
+
+    uint256 private _totalBurned = 0;
+
+    uint256 private _totalMinted = 0;
+
+    mapping (address => uint256) private _rOwned;
+    mapping (address => uint256) private _tOwned;
+
+    mapping (address => bool) private _isExcluded;
+    address[] private _excluded;
+   
+    uint256 private constant MAX = ~uint256(0);
+    uint256 private  _tTotal;
+    uint256 private _rTotal;
+    uint256 private _tFeeTotal;
+
+    constructor() public {
+    _tTotal = initialSupply;
+    uint256 _max = MAX.div(1e36);
+    _rTotal = (_max - (_max % _tTotal));
+    _rOwned[founder] =  _rTotal;
+    _tOwned[founder] = _tTotal;
+    _totalMinted = _totalMinted.add(_tTotal);
     }
 
-    /**
-     * @dev Returns the bep token owner.
-     */
+    function reflectionFromToken(uint256 tAmount, bool deductTransferFee) public view returns(uint256) {
+        require(tAmount <= _tTotal, "MDR: Amount must be less than supply");
+        if (!deductTransferFee) {
+            (uint256 rAmount,,,,) = _getValues(tAmount);
+            return rAmount;
+        } else {
+            (,uint256 rTransferAmount,,,) = _getValues(tAmount);
+            return rTransferAmount;
+        }
+    }
+
+    function tokenFromReflection(uint256 rAmount) public view returns(uint256) {
+        require(rAmount <= _rTotal, "MDR: Amount must be less than total reflections");
+        uint256 currentRate =  _getRate();
+        return rAmount.div(currentRate);
+    }
+
+    function excludeAccount(address account) external onlyOwner() {
+        require(!_isExcluded[account], "MDR: Account is already excluded");
+        if(_rOwned[account] > 0) {
+            _tOwned[account] = tokenFromReflection(_rOwned[account]);
+        }
+        _isExcluded[account] = true;
+        _excluded.push(account);
+    }
+
+    function includeAccount(address account) external onlyOwner() {
+        require(_isExcluded[account], "MDR: Account is already excluded");
+        for (uint256 i = 0; i < _excluded.length; i++) {
+            if (_excluded[i] == account) {
+                _excluded[i] = _excluded[_excluded.length - 1];
+                _tOwned[account] = 0;
+                _isExcluded[account] = false;
+                _excluded.pop();
+                break;
+            }
+        }
+    }
+
+    function _approve(address owner, address spender, uint256 amount) private {
+        require(owner != address(0), "MDR: approve from the zero address");
+        require(spender != address(0), "MDR: approve to the zero address");
+
+        _allowances[owner][spender] = amount;
+        emit Approval(owner, spender, amount);
+    }
+
+    function mint(address receiver, uint256 amount) public onlyOwner{
+        uint256 _totalBalance = totalSupply();
+        require(_totalBalance + amount <= maxSupply, "MDR: You can't mint more than max supply");
+        _mint(receiver, amount);
+
+         emit Mint(receiver, amount);
+    }
+
+    function updateTotalBurned( uint256 amount) public onlyOwner{
+       require(amount > 0, "MDR: Amount cannot be 0");
+        _totalBurned = _totalBurned.add(amount);
+    }
+    
+    function _mint(address receiver, uint256 amount) private {
+        require(receiver != address(0), "MDR: Receiver cannot 0 address");
+        require(amount > 0, "MDR: Mint Amount cannot be 0");
+        uint256 maxMintAmount = (maxSupply - initialSupply).mul(200)/10000;
+        require(amount < maxMintAmount, "MDR: Owner can't mint more than max amount");
+        uint256 _rate = _getRate();
+        _tTotal = _tTotal.add(amount);
+        // rTotal should be increased as well
+        _rTotal = _rTotal.add(amount.mul(_rate));
+        _rOwned[receiver] = _rOwned[receiver].add(amount.mul(_rate));
+        if(_isExcluded[receiver]){
+            _tOwned[receiver] = _tOwned[receiver].add(amount);
+        }
+        _totalMinted = _totalMinted.add(amount);
+        emit Transfer(address(0), receiver, amount);
+    }
+
+    function _burn(address _account, uint256 amount) private {
+        require(amount > 0, "MDR: Burn Amount cannot be 0");
+        require(_account != address(0), "MDR: burn from the zero address");
+        address sender = _account;
+        uint256 _rate = _getRate();
+        _tTotal = _tTotal.sub(amount);
+        // rTotal should be decreased as well
+        _rTotal = _rTotal.sub(amount.mul(_rate));
+        _rOwned[sender] =  _rOwned[sender].sub(amount.mul(_rate));
+        if(_isExcluded[sender]){
+             _tOwned[sender] = _tOwned[sender].sub(amount);
+        }
+        _totalBurned = _totalBurned.add(amount);
+        emit Transfer(sender, address(0), amount);
+
+    }
+
+    function _transfer(address sender, address recipient, uint256 amount) private  {
+        require(sender != address(0), "MDR: transfer from the zero address");
+        require(recipient != address(0), "MDR: transfer to the zero address");
+        require(amount > 0, "MDR: Transfer amount must be greater than zero");
+        if (_isExcluded[sender] && !_isExcluded[recipient]) {
+            _transferFromExcluded(sender, recipient, amount);
+        } else if (!_isExcluded[sender] && _isExcluded[recipient]) {
+            _transferToExcluded(sender, recipient, amount);
+        } else if (!_isExcluded[sender] && !_isExcluded[recipient]) {
+            _transferStandard(sender, recipient, amount);
+        } else if (_isExcluded[sender] && _isExcluded[recipient]) {
+            _transferBothExcluded(sender, recipient, amount);
+        } else {
+            _transferStandard(sender, recipient, amount);
+        }
+    }
+
+    function _transferStandard(address sender, address recipient, uint256 tAmount) private {
+        (uint256 rAmount, uint256 rTransferAmount, uint256 rFee, uint256 tTransferAmount, uint256 tFee) = _getValues(tAmount);
+        _rOwned[sender] = _rOwned[sender].sub(rAmount);
+        _rOwned[recipient] = _rOwned[recipient].add(rTransferAmount);
+        _reflectFee(rFee, tFee);
+        emit Transfer(sender, recipient, tTransferAmount);
+    }
+
+    function _transferToExcluded(address sender, address recipient, uint256 tAmount) private {
+        (uint256 rAmount, uint256 rTransferAmount, uint256 rFee, uint256 tTransferAmount, uint256 tFee) = _getValues(tAmount);
+        _rOwned[sender] = _rOwned[sender].sub(rAmount);
+        _tOwned[recipient] = _tOwned[recipient].add(tTransferAmount);
+        _rOwned[recipient] = _rOwned[recipient].add(rTransferAmount);
+        _reflectFee(rFee, tFee);
+        emit Transfer(sender, recipient, tTransferAmount);
+    }
+
+    function _transferFromExcluded(address sender, address recipient, uint256 tAmount) private {
+        (uint256 rAmount, uint256 rTransferAmount, uint256 rFee, uint256 tTransferAmount, uint256 tFee) = _getValues(tAmount);
+        _tOwned[sender] = _tOwned[sender].sub(tAmount);
+        _rOwned[sender] = _rOwned[sender].sub(rAmount);
+        _rOwned[recipient] = _rOwned[recipient].add(rTransferAmount);
+        _reflectFee(rFee, tFee);
+        emit Transfer(sender, recipient, tTransferAmount);
+    }
+
+    function _transferBothExcluded(address sender, address recipient, uint256 tAmount) private {
+        (uint256 rAmount, uint256 rTransferAmount, uint256 rFee, uint256 tTransferAmount, uint256 tFee) = _getValues(tAmount);
+        _tOwned[sender] = _tOwned[sender].sub(tAmount);
+        _rOwned[sender] = _rOwned[sender].sub(rAmount);
+        _tOwned[recipient] = _tOwned[recipient].add(tTransferAmount);
+        _rOwned[recipient] = _rOwned[recipient].add(rTransferAmount);
+        _reflectFee(rFee, tFee);
+        emit Transfer(sender, recipient, tTransferAmount);
+    }
+
+    function _reflectFee(uint256 rFee, uint256 tFee) private {
+        _rTotal = _rTotal.sub(rFee);
+        _tFeeTotal = _tFeeTotal.add(tFee);
+    }
+
+    function _getValues(uint256 tAmount) private view returns (uint256, uint256, uint256, uint256, uint256) {
+        (uint256 tTransferAmount, uint256 tFee) = _getTValues(tAmount);
+        uint256 currentRate =  _getRate();
+        (uint256 rAmount, uint256 rTransferAmount, uint256 rFee) = _getRValues(tAmount, tFee, currentRate);
+        return (rAmount, rTransferAmount, rFee, tTransferAmount, tFee);
+    }
+
+    function _getTValues(uint256 tAmount) private view returns (uint256, uint256) {
+        if(!isRFIEnabled){
+            return(tAmount, 0);
+        }
+        uint256 tFee = tAmount.mul(RFIrate).div(10000);
+        uint256 tTransferAmount = tAmount.sub(tFee);
+        return (tTransferAmount, tFee);
+    }
+
+    function _getRValues(uint256 tAmount, uint256 tFee, uint256 currentRate) private pure returns (uint256, uint256, uint256) {
+        uint256 rAmount = tAmount.mul(currentRate);
+        uint256 rFee = tFee.mul(currentRate);
+        uint256 rTransferAmount = rAmount.sub(rFee);
+        return (rAmount, rTransferAmount, rFee);
+    }
+
+    function _getRate() private view returns(uint256) {
+        (uint256 rSupply, uint256 tSupply) = _getCurrentSupply();
+        return rSupply.div(tSupply);
+    }
+
+    function getCurrentRTSupply() public view returns (uint256, uint256) {
+        return _getCurrentSupply();
+    }
+
+    function totalFee() public view returns(uint256){
+        return _tFeeTotal;
+    }
+
+
+    function _getCurrentSupply() private view returns(uint256, uint256) {
+        uint256 rSupply = _rTotal;
+        uint256 tSupply = _tTotal;
+        for (uint256 i = 0; i < _excluded.length; i++) {
+            if (_rOwned[_excluded[i]] > rSupply || _tOwned[_excluded[i]] > tSupply) return (_rTotal, _tTotal);
+            rSupply = rSupply.sub(_rOwned[_excluded[i]]);
+            tSupply = tSupply.sub(_tOwned[_excluded[i]]);
+        }
+        if (rSupply < _rTotal.div(_tTotal)) return (_rTotal, _tTotal);
+        return (rSupply, tSupply);
+    }
+    
+
     function getOwner() external override view returns (address) {
         return owner();
     }
@@ -594,14 +792,52 @@ contract BEP20 is Context, IBEP20, Ownable {
      * @dev See {BEP20-totalSupply}.
      */
     function totalSupply() public override view returns (uint256) {
-        return _totalSupply;
+        return _tTotal;
+    }
+
+    function circulationSupply() public view returns (uint256) {
+        return totalSupply().sub(totalBurned());
+    }
+
+
+    function totalBurned() public view returns (uint256) {
+        return _totalBurned;
+    }
+
+    
+    function totalMinted() public view returns (uint256) {
+        return _totalMinted;
     }
 
     /**
      * @dev See {BEP20-balanceOf}.
      */
     function balanceOf(address account) public override view returns (uint256) {
-        return _balances[account];
+            if (_isExcluded[account]) return _tOwned[account];
+            return tokenFromReflection(_rOwned[account]);
+    }
+
+    /**
+     * @dev update RFI rate.
+     */
+    function updateRFIRate(uint256 _rfiRate) public onlyOwner {
+        require(_rfiRate > 0, "RFI rate can't be 0");
+        require(_rfiRate <= 500, "MDR: You can't set RFI more than 5%");
+        RFIrate = _rfiRate;
+    }
+
+    function updateTransferBurnRate(uint256 _burnRate) public onlyOwner {
+        require(_burnRate > 0, "RFI rate can't be 0");
+        require(_burnRate <= 500, "MDR: You can't set transfer Burn Rate more than 5%");
+        transferBurnrate = _burnRate;
+    }
+
+    function setRFIEnabled() public onlyOwner {
+       isRFIEnabled = !isRFIEnabled;
+    }
+
+    function setIsTranferBurn() public onlyOwner {
+       isTranferBurnedEnabled = !isTranferBurnedEnabled;
     }
 
     /**
@@ -613,6 +849,13 @@ contract BEP20 is Context, IBEP20, Ownable {
      * - the caller must have a balance of at least `amount`.
      */
     function transfer(address recipient, uint256 amount) public override returns (bool) {
+        require(recipient != address(0), "MDR: recipient can't be the zero address");
+        if(isTranferBurnedEnabled){
+            uint256 burnAmount = amount.mul(transferBurnrate)/ 10000;
+            amount = amount.sub(burnAmount);
+            _transfer(_msgSender(), burnAddr, burnAmount);
+            _totalBurned = _totalBurned.add(burnAmount);
+        }
         _transfer(_msgSender(), recipient, amount);
         return true;
     }
@@ -702,488 +945,7 @@ contract BEP20 is Context, IBEP20, Ownable {
         return true;
     }
 
-    /**
-     * @dev Creates `amount` tokens and assigns them to `msg.sender`, increasing
-     * the total supply.
-     *
-     * Requirements
-     *
-     * - `msg.sender` must be the token owner
-     */
-    function mint(uint256 amount) public onlyOwner returns (bool) {
-        _mint(_msgSender(), amount);
-        return true;
-    }
-
-    /**
-     * @dev Moves tokens `amount` from `sender` to `recipient`.
-     *
-     * This is internal function is equivalent to {transfer}, and can be used to
-     * e.g. implement automatic token fees, slashing mechanisms, etc.
-     *
-     * Emits a {Transfer} event.
-     *
-     * Requirements:
-     *
-     * - `sender` cannot be the zero address.
-     * - `recipient` cannot be the zero address.
-     * - `sender` must have a balance of at least `amount`.
-     */
-    function _transfer(
-        address sender,
-        address recipient,
-        uint256 amount
-    ) internal virtual{
-        require(sender != address(0), 'BEP20: transfer from the zero address');
-        require(recipient != address(0), 'BEP20: transfer to the zero address');
-
-        _balances[sender] = _balances[sender].sub(amount, 'BEP20: transfer amount exceeds balance');
-        _balances[recipient] = _balances[recipient].add(amount);
-        emit Transfer(sender, recipient, amount);
-    }
-
-    /** @dev Creates `amount` tokens and assigns them to `account`, increasing
-     * the total supply.
-     *
-     * Emits a {Transfer} event with `from` set to the zero address.
-     *
-     * Requirements
-     *
-     * - `to` cannot be the zero address.
-     */
-    function _mint(address account, uint256 amount) internal {
-        require(account != address(0), 'BEP20: mint to the zero address');
-
-        _totalSupply = _totalSupply.add(amount);
-        _balances[account] = _balances[account].add(amount);
-        emit Transfer(address(0), account, amount);
-    }
-
-    /**
-     * @dev Destroys `amount` tokens from `account`, reducing the
-     * total supply.
-     *
-     * Emits a {Transfer} event with `to` set to the zero address.
-     *
-     * Requirements
-     *
-     * - `account` cannot be the zero address.
-     * - `account` must have at least `amount` tokens.
-     */
-    function _burn(address account, uint256 amount) internal {
-        require(account != address(0), 'BEP20: burn from the zero address');
-
-        _balances[account] = _balances[account].sub(amount, 'BEP20: burn amount exceeds balance');
-        _totalSupply = _totalSupply.sub(amount);
-        emit Transfer(account, address(0), amount);
-    }
-
-    /**
-     * @dev Sets `amount` as the allowance of `spender` over the `owner`s tokens.
-     *
-     * This is internal function is equivalent to `approve`, and can be used to
-     * e.g. set automatic allowances for certain subsystems, etc.
-     *
-     * Emits an {Approval} event.
-     *
-     * Requirements:
-     *
-     * - `owner` cannot be the zero address.
-     * - `spender` cannot be the zero address.
-     */
-    function _approve(
-        address owner,
-        address spender,
-        uint256 amount
-    ) internal {
-        require(owner != address(0), 'BEP20: approve from the zero address');
-        require(spender != address(0), 'BEP20: approve to the zero address');
-
-        _allowances[owner][spender] = amount;
-        emit Approval(owner, spender, amount);
-    }
-
-    /**
-     * @dev Destroys `amount` tokens from `account`.`amount` is then deducted
-     * from the caller's allowance.
-     *
-     * See {_burn} and {_approve}.
-     */
-    function _burnFrom(address account, uint256 amount) internal {
-        _burn(account, amount);
-        _approve(
-            account,
-            _msgSender(),
-            _allowances[account][_msgSender()].sub(amount, 'BEP20: burn amount exceeds allowance')
-        );
-    }
-}
-
-// File: contracts\Lib\DateTime.sol
-
-pragma solidity ^0.6.12;
-
-contract DateTime {
-        /*
-         *  Date and Time utilities for ethereum contracts
-         *
-         */
-        struct _DateTime {
-                uint16 year;
-                uint8 month;
-                uint8 day;
-                uint8 hour;
-                uint8 minute;
-                uint8 second;
-                uint8 weekday;
-        }
-
-        uint constant DAY_IN_SECONDS = 86400;
-        uint constant YEAR_IN_SECONDS = 31536000;
-        uint constant LEAP_YEAR_IN_SECONDS = 31622400;
-
-        uint constant HOUR_IN_SECONDS = 3600;
-        uint constant MINUTE_IN_SECONDS = 60;
-
-        uint16 constant ORIGIN_YEAR = 1970;
-
-        function isLeapYear(uint16 year) public pure returns (bool) {
-                if (year % 4 != 0) {
-                        return false;
-                }
-                if (year % 100 != 0) {
-                        return true;
-                }
-                if (year % 400 != 0) {
-                        return false;
-                }
-                return true;
-        }
-
-        function leapYearsBefore(uint year) public pure returns (uint) {
-                year -= 1;
-                return year / 4 - year / 100 + year / 400;
-        }
-
-        function getDaysInMonth(uint8 month, uint16 year) public pure returns (uint8) {
-                if (month == 1 || month == 3 || month == 5 || month == 7 || month == 8 || month == 10 || month == 12) {
-                        return 31;
-                }
-                else if (month == 4 || month == 6 || month == 9 || month == 11) {
-                        return 30;
-                }
-                else if (isLeapYear(year)) {
-                        return 29;
-                }
-                else {
-                        return 28;
-                }
-        }
-
-        function parseTimestamp(uint timestamp) internal pure returns (_DateTime memory dt) {
-                uint secondsAccountedFor = 0;
-                uint buf;
-                uint8 i;
-
-                // Year
-                dt.year = getYear(timestamp);
-                buf = leapYearsBefore(dt.year) - leapYearsBefore(ORIGIN_YEAR);
-
-                secondsAccountedFor += LEAP_YEAR_IN_SECONDS * buf;
-                secondsAccountedFor += YEAR_IN_SECONDS * (dt.year - ORIGIN_YEAR - buf);
-
-                // Month
-                uint secondsInMonth;
-                for (i = 1; i <= 12; i++) {
-                        secondsInMonth = DAY_IN_SECONDS * getDaysInMonth(i, dt.year);
-                        if (secondsInMonth + secondsAccountedFor > timestamp) {
-                                dt.month = i;
-                                break;
-                        }
-                        secondsAccountedFor += secondsInMonth;
-                }
-
-                // Day
-                for (i = 1; i <= getDaysInMonth(dt.month, dt.year); i++) {
-                        if (DAY_IN_SECONDS + secondsAccountedFor > timestamp) {
-                                dt.day = i;
-                                break;
-                        }
-                        secondsAccountedFor += DAY_IN_SECONDS;
-                }
-
-                // Hour
-                dt.hour = getHour(timestamp);
-
-                // Minute
-                dt.minute = getMinute(timestamp);
-
-                // Second
-                dt.second = getSecond(timestamp);
-
-                // Day of week.
-                dt.weekday = getWeekday(timestamp);
-        }
-
-        function getYear(uint timestamp) public pure returns (uint16) {
-                uint secondsAccountedFor = 0;
-                uint16 year;
-                uint numLeapYears;
-
-                // Year
-                year = uint16(ORIGIN_YEAR + timestamp / YEAR_IN_SECONDS);
-                numLeapYears = leapYearsBefore(year) - leapYearsBefore(ORIGIN_YEAR);
-
-                secondsAccountedFor += LEAP_YEAR_IN_SECONDS * numLeapYears;
-                secondsAccountedFor += YEAR_IN_SECONDS * (year - ORIGIN_YEAR - numLeapYears);
-
-                while (secondsAccountedFor > timestamp) {
-                        if (isLeapYear(uint16(year - 1))) {
-                                secondsAccountedFor -= LEAP_YEAR_IN_SECONDS;
-                        }
-                        else {
-                                secondsAccountedFor -= YEAR_IN_SECONDS;
-                        }
-                        year -= 1;
-                }
-                return year;
-        }
-
-        function getMonth(uint timestamp) public pure returns (uint8) {
-                return parseTimestamp(timestamp).month;
-        }
-
-        function getDay(uint timestamp) public pure returns (uint8) {
-                return parseTimestamp(timestamp).day;
-        }
-
-        function getHour(uint timestamp) public pure returns (uint8) {
-                return uint8((timestamp / 60 / 60) % 24);
-        }
-
-        function getMinute(uint timestamp) public pure returns (uint8) {
-                return uint8((timestamp / 60) % 60);
-        }
-
-        function getSecond(uint timestamp) public pure returns (uint8) {
-                return uint8(timestamp % 60);
-        }
-
-        function getWeekday(uint timestamp) public pure returns (uint8) {
-                return uint8((timestamp / DAY_IN_SECONDS + 4) % 7);
-        }
-
-        function toTimestamp(uint16 year, uint8 month, uint8 day) public pure returns (uint timestamp) {
-                return toTimestamp(year, month, day, 0, 0, 0);
-        }
-
-        function toTimestamp(uint16 year, uint8 month, uint8 day, uint8 hour) public pure returns (uint timestamp) {
-                return toTimestamp(year, month, day, hour, 0, 0);
-        }
-
-        function toTimestamp(uint16 year, uint8 month, uint8 day, uint8 hour, uint8 minute) public pure returns (uint timestamp) {
-                return toTimestamp(year, month, day, hour, minute, 0);
-        }
-
-        function toTimestamp(uint16 year, uint8 month, uint8 day, uint8 hour, uint8 minute, uint8 second) public pure returns (uint timestamp) {
-                uint16 i;
-
-                // Year
-                for (i = ORIGIN_YEAR; i < year; i++) {
-                        if (isLeapYear(i)) {
-                                timestamp += LEAP_YEAR_IN_SECONDS;
-                        }
-                        else {
-                                timestamp += YEAR_IN_SECONDS;
-                        }
-                }
-
-                // Month
-                uint8[12] memory monthDayCounts;
-                monthDayCounts[0] = 31;
-                if (isLeapYear(year)) {
-                        monthDayCounts[1] = 29;
-                }
-                else {
-                        monthDayCounts[1] = 28;
-                }
-                monthDayCounts[2] = 31;
-                monthDayCounts[3] = 30;
-                monthDayCounts[4] = 31;
-                monthDayCounts[5] = 30;
-                monthDayCounts[6] = 31;
-                monthDayCounts[7] = 31;
-                monthDayCounts[8] = 30;
-                monthDayCounts[9] = 31;
-                monthDayCounts[10] = 30;
-                monthDayCounts[11] = 31;
-
-                for (i = 1; i < month; i++) {
-                        timestamp += DAY_IN_SECONDS * monthDayCounts[i - 1];
-                }
-
-                // Day
-                timestamp += DAY_IN_SECONDS * (day - 1);
-
-                // Hour
-                timestamp += HOUR_IN_SECONDS * (hour);
-
-                // Minute
-                timestamp += MINUTE_IN_SECONDS * (minute);
-
-                // Second
-                timestamp += second;
-
-                return timestamp;
-        }
-}
-
-// File: contracts\MrDriverToken.sol
-
-/**
- *Submitted for verification at BscScan.com on 2020-09-22
-*/
-
-pragma solidity 0.6.12;
-// MrDriverToken with Governance.
-contract MrDriverToken is BEP20('MrDriver', 'MDR') {
-    uint256 public maxSupply = 200 * 10 ** 6 * 10 ** 18;
-
-    uint256 public presaleRate = 1000;
-    uint256 public safuRate = 200;
-    uint256 public teamRate = 1000;
-    uint256 public treasuryRate = 2800;
-    uint256 public monthlyRate = 50;
-
-    address public presaleAdmin = 0xFa3d3799a51e131d4DD5BF34d6505A9C0171eead;
-    address public safuAddr = 0xFa3d3799a51e131d4DD5BF34d6505A9C0171eead;
-    address public teamAddr = 0xFa3d3799a51e131d4DD5BF34d6505A9C0171eead;
-    address public treasuryAddr = 0xFa3d3799a51e131d4DD5BF34d6505A9C0171eead;
-    address public releaseAddr = 0xFa3d3799a51e131d4DD5BF34d6505A9C0171eead;
-
-    bool presaleStarted = false;
-    bool presaleEnded = false;
-
-    uint lastReleaseTime = 0;
-    uint releaseStartTime = 0;
-    
-    DateTime dateTime;
-
-    constructor() public {
-
-    }
-
-    /// @notice Creates `_amount` token to `_to`. Must only be called by the owner (MasterChef).
-    function mint(address _to, uint256 _amount) public onlyOwner returns(bool) {
-        uint256 totalSupplyAfterMint = totalSupply().add(_amount);
-        require(totalSupplyAfterMint < maxSupply, "MDR::can't mint over max supply");
-        _mint(_to, _amount);
-        _moveDelegates(address(0), _delegates[_to], _amount);
-        return true;
-    }
-
-    function updatePresaleAdmin(address _presaleAdmin) public onlyOwner {
-        presaleAdmin = _presaleAdmin;
-    }
-
-    function updateSafuAddr(address _safuAddr) public onlyOwner {
-        safuAddr = _safuAddr;
-    }
-
-    function updateTeamAddr(address _teamAddr) public onlyOwner {
-        teamAddr = _teamAddr;
-    }
-
-    function updateTreasuryAddr(address _treasuryAddr) public onlyOwner {
-        treasuryAddr = _treasuryAddr;
-    }
-
-    function updateReleaseAddr(address _releaseAddr) public onlyOwner {
-        releaseAddr = _releaseAddr;
-    }
-
-    function updatePresaleRate(uint16 _presaleRate) public onlyOwner {
-        require(_presaleRate <= 2000, "MDR:: presale rate must not exceed 20%.");
-        require(_presaleRate > 0, "MDR:: presale rate must be greater than 0.");
-
-        presaleRate = _presaleRate;
-    }
-
-    function updateSafuRate(uint16 _safuRate) public onlyOwner {
-        require(_safuRate <= 2000, "MDR:: safu rate must not exceed 20%.");
-        require(_safuRate > 0, "MDR:: safu rate must be greater than 0.");
-
-        safuRate = _safuRate;
-    }
-
-    function updateTeamRate(uint16 _teamRate) public onlyOwner {
-        require(_teamRate <= 2000, "MDR:: team rate must not exceed 20%.");
-        require(_teamRate > 0, "MDR:: team rate must be greater than 0.");
-
-        teamRate = _teamRate;
-    }
-
-    function updateTreasuryRate(uint16 _treasuryRate) public onlyOwner {
-        require(_treasuryRate <= 5000, "MDR:: treasury rate must not exceed 50%.");
-        require(_treasuryRate > 0, "MDR:: treasury rate must be greater than 0.");
-
-        treasuryRate = _treasuryRate;
-    }
-
-    function updateMonthlyRate(uint16 _monthlyRate) public onlyOwner {
-        require(_monthlyRate <= 200, "MDR:: monthly rate must not exceed 2%.");
-        require(_monthlyRate > 0, "MDR:: monthly rate must be greater than 0.");
-
-        monthlyRate = _monthlyRate;
-    }
-
-    function startPresale() public onlyOwner {
-        require(presaleStarted == false, "MDR:: presale started");
-        require(presaleEnded == false, "MDR:: presale ended");
-
-        _mint(presaleAdmin, maxSupply.mul(presaleRate).div(10000));
-        presaleStarted = true;
-    }
-
-    function endPresale() public onlyOwner {
-        require(presaleStarted == true, "MDR:: presale not started");
-        require(presaleEnded == false, "MDR:: presale ended");
-
-        _mint(safuAddr, maxSupply.mul(safuRate).div(10000));
-        _mint(teamAddr, maxSupply.mul(teamRate).div(10000));
-        _mint(treasuryAddr, maxSupply.mul(treasuryRate).div(10000));
-        presaleEnded = true;
-        lastReleaseTime = block.timestamp;
-        releaseStartTime = block.timestamp;
-    }
-
-    function releaseTokenMonthly() public onlyOwner {
-        uint startYear = dateTime.getYear(releaseStartTime);
-        uint startMonth = dateTime.getMonth(releaseStartTime);
-        uint lastYear = dateTime.getYear(lastReleaseTime);
-        uint lastMonth = dateTime.getMonth(lastReleaseTime);
-        uint curYear = dateTime.getYear(block.timestamp);
-        uint curMonth = dateTime.getMonth(block.timestamp);
-
-        require(curYear >= lastYear, "MDR:: release time is not valid");
-        require(curMonth > lastMonth, "MDR:: release time is not valid");
-        require(maxSupply > totalSupply(), "MDR:: all tokens released");
-
-        uint diffMonth = (curYear * 12 + curMonth) - (startYear * 12 + startMonth);
-        uint tSupply = maxSupply * diffMonth * monthlyRate / 10000 + totalSupply();
-
-        if (tSupply > maxSupply) 
-            tSupply = maxSupply;
-
-        uint releaseAmount = tSupply - totalSupply();
-
-        require(releaseAmount > 0, "MDR:: release amount is not valid" );
-
-        _mint(releaseAddr, releaseAmount);
-    }
-
-
-    /// @dev A record of each accounts delegate
+     /// @dev A record of each accounts delegate
     mapping (address => address) internal _delegates;
 
     /// @notice A checkpoint for marking number of votes from a given block
@@ -1406,6 +1168,5 @@ contract MrDriverToken is BEP20('MrDriver', 'MDR') {
         assembly { chainId := chainid() }
         return chainId;
     }    
-
 
 }
